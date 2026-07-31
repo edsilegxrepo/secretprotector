@@ -22,12 +22,60 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
-	"criticalsys/secretprotector/pkg/libsecsecrets"
+	"criticalsys.net/secretprotector/pkg/libsecsecrets"
 )
+
+// Exit code constants returned by SecretProtector to provide granular error diagnostic statuses:
+// - ExitSuccess (0): Clean, successful execution.
+// - ExitUsageError (2): Invalid flags, missing required arguments, or mutually exclusive options.
+// - ExitKeyResolutionError (3): Unresolved master key or file permission check failure.
+// - ExitCryptoError (4): Base64 decoding, MAC tag verification failure, or AES-GCM decryption error.
+// - ExitIOError (5): File read/write failure or standard input streaming error.
+const (
+	ExitSuccess            = 0
+	ExitUsageError         = 2
+	ExitKeyResolutionError = 3
+	ExitCryptoError        = 4
+	ExitIOError            = 5
+)
+
+// exitError wraps a standard error with a specific process diagnostic exit code.
+type exitError struct {
+	code int
+	err  error
+}
+
+// Error implements the standard error interface by returning the underlying error string.
+func (e *exitError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap enables standard Go error inspection and unwrapping via errors.Is and errors.As.
+func (e *exitError) Unwrap() error {
+	return e.err
+}
+
+// exitCode inspects an error and returns its associated numeric process exit status code.
+// - If err is nil, returns ExitSuccess (0).
+// - If err wraps an *exitError, returns its specific diagnostic code.
+// - Otherwise, defaults to standard exit code 1.
+func exitCode(err error) int {
+	if err == nil {
+		return ExitSuccess
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.code
+	}
+	return 1
+}
 
 // version is the application version, which can be overridden at compile time
 // using -ldflags="-X main.version=..."
@@ -36,20 +84,12 @@ var version = "dev"
 func main() {
 	ctx := context.Background()
 	if err := runMain(ctx); err != nil {
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 
 // runMain is the primary entry point for the CLI logic.
 // It handles flag parsing, key resolution, and dispatches to library functions.
-//
-// Data Flow:
-//  1. Parse CLI flags and validate mutual exclusivity (implicit by priority).
-//  2. If 'generate', call libsecsecrets.GenerateKey and exit.
-//  3. Resolve the master key using libsecsecrets.ResolveKey.
-//  4. Perform encryption or decryption based on provided flags.
-//     Supports any sensitive application secret (e.g., SFTP, API, DB).
-//  5. Securely zero out the resolved master key buffer before exiting.
 func runMain(ctx context.Context) error {
 	// CLI Flag Definitions
 	versionFlag := flag.Bool("version", false, "Print the version information and exit")
@@ -70,60 +110,101 @@ func runMain(ctx context.Context) error {
 		return nil
 	}
 
+	// Validate Flag Mutual Exclusivity
+	actionCount := 0
+	if *generateFlag {
+		actionCount++
+	}
+	if *encryptFlag != "" {
+		actionCount++
+	}
+	if *decryptFlag != "" {
+		actionCount++
+	}
+
+	if actionCount > 1 {
+		err := fmt.Errorf("conflicting options: -generate, -encrypt, and -decrypt are mutually exclusive")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return &exitError{code: ExitUsageError, err: err}
+	}
+
+	if (*encryptFlag == "-" || *decryptFlag == "-") && *keyFileFlag == "-" {
+		err := fmt.Errorf("cannot read both secret payload and key file from stdin simultaneously")
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return &exitError{code: ExitUsageError, err: err}
+	}
+
+	// Warn on command-line argument secret exposure
+	if *keyFlag != "" {
+		fmt.Fprintln(os.Stderr, "Warning: Passing sensitive master keys directly via CLI flags risks process listing exposure (ps aux). Prefer -key-env or -key-file.")
+	}
+	if *encryptFlag != "" && *encryptFlag != "-" {
+		fmt.Fprintln(os.Stderr, "Warning: Passing plaintext secrets directly via CLI flags risks process listing exposure (ps aux). Prefer stdin (-encrypt -).")
+	}
+
 	// Execution Flow: Key Generation
-	// This branch does not require an existing key.
 	if *generateFlag {
 		key, err := libsecsecrets.GenerateKey()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error generating key: %v\n", err)
-			return err
+			return &exitError{code: ExitCryptoError, err: err}
 		}
-		defer func() {
-			// Note: The key is a string (hex encoded), so zeroing is limited.
-			// In a production app, we'd use []byte for keys as much as possible.
-		}()
 		fmt.Println(key)
 		return nil
 	}
 
 	// Execution Flow: Encryption
-	// Requires a master key resolved from flags, env, or file.
 	if *encryptFlag != "" {
+		plainText := *encryptFlag
+		if plainText == "-" {
+			inputBytes, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+				return &exitError{code: ExitIOError, err: err}
+			}
+			plainText = strings.TrimRight(string(inputBytes), "\r\n")
+		}
+
 		key, err := libsecsecrets.ResolveKey(ctx, *keyFlag, *keyEnvFlag, *keyFileFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving key: %v\n", err)
-			return err
+			return &exitError{code: ExitKeyResolutionError, err: err}
 		}
 		defer libsecsecrets.ZeroBuffer(key)
 
-		encrypted, err := libsecsecrets.Encrypt(ctx, *encryptFlag, key)
+		encrypted, err := libsecsecrets.Encrypt(ctx, plainText, key)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error encrypting: %v\n", err)
-			return err
+			return &exitError{code: ExitCryptoError, err: err}
 		}
 		fmt.Println(encrypted)
 		return nil
 	}
 
 	// Execution Flow: Decryption
-	// Requires a master key resolved from flags, env, or file.
 	if *decryptFlag != "" {
+		cipherText := *decryptFlag
+		if cipherText == "-" {
+			inputBytes, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+				return &exitError{code: ExitIOError, err: err}
+			}
+			cipherText = strings.TrimSpace(string(inputBytes))
+		}
+
 		key, err := libsecsecrets.ResolveKey(ctx, *keyFlag, *keyEnvFlag, *keyFileFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving key: %v\n", err)
-			return err
+			return &exitError{code: ExitKeyResolutionError, err: err}
 		}
 		defer libsecsecrets.ZeroBuffer(key)
 
-		decrypted, err := libsecsecrets.Decrypt(ctx, *decryptFlag, key)
+		decrypted, err := libsecsecrets.Decrypt(ctx, cipherText, key)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error decrypting: %v\n", err)
-			return err
+			return &exitError{code: ExitCryptoError, err: err}
 		}
-		defer func() {
-			// Zero out the decrypted plaintext if it was a slice,
-			// but here it's returned as a string.
-		}()
 		fmt.Println(decrypted)
 		return nil
 	}

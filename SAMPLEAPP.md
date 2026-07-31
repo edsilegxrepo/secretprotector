@@ -2,6 +2,8 @@
 
 This document explains how to integrate the `libsecsecrets` library into your Go application (e.g., an SFTP client, API consumer, or database connector) for secure, runtime decryption of secrets.
 
+---
+
 ## 1. Project Structure
 
 Your application should follow a clean separation of concerns:
@@ -13,6 +15,8 @@ Your application should follow a clean separation of concerns:
 └── main.go
 ```
 
+---
+
 ## 2. Configuration (`config.json`)
 
 Store the obfuscated password and the path to the master key in your configuration file.
@@ -21,14 +25,16 @@ Store the obfuscated password and the path to the master key in your configurati
 {
   "host": "sftp.example.com",
   "user": "deploy_user",
-  "encrypted_pass": "A1B2C3D4...",
+  "encrypted_pass": "v1:gcm:A1B2C3D4...Base64EncryptedCiphertext==",
   "master_key_path": "/etc/secrets/key.txt"
 }
 ```
 
+---
+
 ## 3. Bootstrap Sequence (`main.go`)
 
-Follow these steps to safely initialize your application.
+Follow these steps to safely initialize your application using `libsecsecrets`.
 
 ```go
 package main
@@ -36,11 +42,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
-	"criticalsys/secretprotector/pkg/libsecsecrets"
+	"criticalsys.net/secretprotector/pkg/libsecsecrets"
 )
 
 type Config struct {
@@ -51,37 +59,46 @@ type Config struct {
 }
 
 func main() {
-	ctx := context.Background()
+	// 1. Create a Context with Timeout for initialization
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// 1. Load Configuration
+	// 2. Load Configuration
 	cfg, err := loadConfig("config.json")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 2. Resolve Master Key
+	// 3. Resolve Master Key
 	// Priority: Flag (if any) > Environment Variable > File Path from config
 	// Note: 'masterKey' is a []byte returned by ResolveKey.
 	masterKey, err := libsecsecrets.ResolveKey(ctx, "", "SECRETPROTECTOR_MASTER_KEY", cfg.MasterKeyPath)
 	if err != nil {
-		log.Fatalf("Security failure: %v", err)
+		if errors.Is(err, libsecsecrets.ErrNoKeySource) {
+			log.Fatalf("Security failure: No master key source found.")
+		} else if errors.Is(err, libsecsecrets.ErrInsecurePermissions) || errors.Is(err, libsecsecrets.ErrInsecureLocation) {
+			log.Fatalf("Security boundary violation: %v", err)
+		}
+		log.Fatalf("Security failure resolving key: %v", err)
 	}
 	// Immediately defer zeroing the buffer to ensure it's cleared on exit.
 	defer libsecsecrets.ZeroBuffer(masterKey)
 
-	// 3. Decrypt Secret at Runtime
-	realPass, err := libsecsecrets.Decrypt(ctx, cfg.EncryptedPass, masterKey)
+	// 4. Decrypt Secret at Runtime
+	// Approach A: High-Security Zero-Allocation Byte-Slice Pattern (Recommended)
+	passBytes, err := libsecsecrets.DecryptBytes(ctx, []byte(cfg.EncryptedPass), masterKey)
 	if err != nil {
 		log.Fatalf("Decryption failure: %v", err)
 	}
-	defer func() {
-		// realPass is a string, so we cannot ZeroBuffer it directly.
-		// In high-security apps, consider using []byte for secrets.
-	}()
+	// Zero out secret bytes immediately when function finishes
+	defer libsecsecrets.ZeroBuffer(passBytes)
 
-	// 4. Use Secret (Memory Only)
+	// Approach B: String-Based Pattern (Convenience)
+	// realPass, err := libsecsecrets.Decrypt(ctx, cfg.EncryptedPass, masterKey)
+
+	// 5. Use Secret (Memory Only)
 	fmt.Printf("Connecting to %s as %s...\n", cfg.Host, cfg.User)
-	performSecureOperation(cfg.Host, cfg.User, realPass)
+	performSecureOperation(cfg.Host, cfg.User, passBytes)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -96,16 +113,19 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func performSecureOperation(host, user, pass string) {
+func performSecureOperation(host, user string, pass []byte) {
 	// Mock operation logic (e.g., SFTP, API, DB)
-	// The 'pass' variable is never written to logs or disk
+	// The 'pass' byte slice is never written to logs or disk
 	fmt.Println("Secure operation established successfully.")
 }
 ```
 
+---
+
 ## 4. Security Best Practices
 
-*   **Memory Hygiene:** Never print the decrypted `realPass` to `stdout` or logs. Always use `defer libsecsecrets.ZeroBuffer(masterKey)` to clear sensitive keys from memory as soon as they are resolved. Note that `libsecsecrets` uses `sync.Pool` internally for efficient buffer management during key generation, but manual zeroing of resolved keys remains a critical responsibility of the consumer application.
-*   **Context Support:** Use `context.Context` for all library calls to support timeouts and cancellations in production environments.
-*   **Fail Fast:** If the master key cannot be resolved or decryption fails, the application **must** terminate immediately.
-*   **Key Protection:** On Linux, ensure the key file has `0400` permissions. On Windows, store the key in a restricted user directory.
+*   **Memory Hygiene:** Never print decrypted passwords or master keys to `stdout` or log files. Always use `defer libsecsecrets.ZeroBuffer(masterKey)` and `defer libsecsecrets.ZeroBuffer(passBytes)` to clear sensitive keys and plaintext byte buffers from memory as soon as cryptographic operations complete. Note that `libsecsecrets` uses `sync.Pool` internally for efficient buffer management during key generation, but manual zeroing of resolved keys and plaintext byte buffers remains a critical responsibility of the consumer application.
+*   **Zero-Allocation Byte API:** Prefer `DecryptBytes(ctx, []byte(ciphertext), masterKey)` over string `Decrypt`, as string decryption allocates heap memory that cannot be explicitly zeroed before garbage collection.
+*   **Context Support:** Use `context.Context` (e.g., `context.WithTimeout`) for all library calls to support timeouts and cancellations in production service environments.
+*   **Fail Fast & Fail Safe:** If the master key cannot be resolved or decryption fails, the application **must** terminate immediately before attempting any unauthenticated operational connections.
+*   **Key File Protection:** On Linux, ensure key files have owner-only `0400` permissions. On Windows, store key files in restricted user profile directories, avoiding shared paths such as `C:\Users\Public` or `%TEMP%`.

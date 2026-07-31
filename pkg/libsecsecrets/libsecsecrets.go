@@ -20,6 +20,7 @@
 package libsecsecrets
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -30,20 +31,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 )
 
-var (
-	// bytePool is a sync.Pool for reducing GC pressure on small byte slices.
-	bytePool = sync.Pool{
-		New: func() interface{} {
-			b := make([]byte, 32)
-			return &b
-		},
-	}
-)
+// bytePool is a sync.Pool for reducing GC pressure on small byte slices.
+var bytePool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 32)
+		return &b
+	},
+}
 
 var (
 	// ErrInvalidKey is returned when the provided key is not a valid 32-byte hex string.
@@ -66,17 +66,65 @@ func ZeroBuffer(b []byte) {
 	}
 }
 
+var (
+	mockMu      sync.RWMutex
+	randReader  io.Reader                         = rand.Reader
+	osReadFile  func(string) ([]byte, error)      = os.ReadFile
+	osStat      func(string) (os.FileInfo, error) = os.Stat
+	runtimeGOOS string                            = runtime.GOOS
+)
+
 // RandReader is an internal variable that can be mocked for testing.
+// Deprecated: Use SetTestMocks helper in tests for thread safety.
 var RandReader = rand.Reader
 
 // OsReadFile is an internal variable that can be mocked for testing.
+// Deprecated: Use SetTestMocks helper in tests for thread safety.
 var OsReadFile = os.ReadFile
 
 // OsStat is an internal variable that can be mocked for testing.
+// Deprecated: Use SetTestMocks helper in tests for thread safety.
 var OsStat = os.Stat
 
 // RuntimeGOOS is an internal variable that can be mocked for testing.
+// Deprecated: Use SetTestMocks helper in tests for thread safety.
 var RuntimeGOOS = runtime.GOOS
+
+func getRandReader() io.Reader {
+	mockMu.RLock()
+	defer mockMu.RUnlock()
+	if RandReader != rand.Reader {
+		return RandReader
+	}
+	return randReader
+}
+
+func getOsReadFile() func(string) ([]byte, error) {
+	mockMu.RLock()
+	defer mockMu.RUnlock()
+	if fmt.Sprintf("%p", OsReadFile) != fmt.Sprintf("%p", os.ReadFile) {
+		return OsReadFile
+	}
+	return osReadFile
+}
+
+func getOsStat() func(string) (os.FileInfo, error) {
+	mockMu.RLock()
+	defer mockMu.RUnlock()
+	if fmt.Sprintf("%p", OsStat) != fmt.Sprintf("%p", os.Stat) {
+		return OsStat
+	}
+	return osStat
+}
+
+func getRuntimeGOOS() string {
+	mockMu.RLock()
+	defer mockMu.RUnlock()
+	if RuntimeGOOS != runtime.GOOS {
+		return RuntimeGOOS
+	}
+	return runtimeGOOS
+}
 
 // DefaultKeyEnv is the default environment variable name used to store the master key.
 const DefaultKeyEnv = "SECRETPROTECTOR_MASTER_KEY"
@@ -96,7 +144,7 @@ func GenerateKey() (string, error) {
 		bytePool.Put(keyPtr)
 	}()
 
-	if _, err := io.ReadFull(RandReader, key); err != nil {
+	if _, err := io.ReadFull(getRandReader(), key); err != nil {
 		return "", fmt.Errorf("failed to generate random key: %w", err)
 	}
 	return hex.EncodeToString(key), nil
@@ -130,12 +178,21 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 
 	// Step 3: Fallback to file resolution if still not found.
 	if keyStr == "" && file != "" {
-		if err := validateFilePermissions(file); err != nil {
-			return nil, err
-		}
-		data, err := OsReadFile(file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read key file: %w", err)
+		var data []byte
+		var err error
+		if file == "-" {
+			data, err = io.ReadAll(os.Stdin)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read key file from stdin: %w", err)
+			}
+		} else {
+			if err := validateFilePermissions(file); err != nil {
+				return nil, err
+			}
+			data, err = getOsReadFile()(file)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read key file: %w", err)
+			}
 		}
 		keyStr = strings.TrimSpace(string(data))
 	}
@@ -162,78 +219,105 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 	return key, nil
 }
 
-// Encrypt takes a plaintext string and a 32-byte key, returning a Base64 string.
-// The output format is: Base64(nonce + ciphertext).
+// EncryptBytes takes a plaintext byte slice and a 32-byte master key, returning Base64-encoded bytes (nonce + ciphertext).
+// Objective: Provide a memory-safe cryptographic primitive operating on byte slices to allow caller-managed zeroing.
 //
 // Data Flow:
-// 1. Initialize AES block cipher with the provided key.
-// 2. Wrap in GCM (Galois/Counter Mode).
-// 3. Generate a unique random nonce.
-// 4. Encrypt and seal, prepending the nonce to the result.
-func Encrypt(ctx context.Context, plain string, key []byte) (string, error) {
+// 1. Validate key length (must be exactly 32 bytes).
+// 2. Initialize AES-256 block cipher and GCM mode.
+// 3. Generate a 12-byte CSPRNG nonce.
+// 4. Encrypt and seal payload, prepending nonce.
+// 5. Base64 encode output into a new byte buffer.
+func EncryptBytes(ctx context.Context, plain []byte, key []byte) ([]byte, error) {
 	if len(key) != 32 {
-		return "", ErrInvalidKey
+		return nil, ErrInvalidKey
 	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("failed to create cipher: %w", err)
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("failed to create GCM: %w", err)
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(RandReader, nonce); err != nil {
-		return "", fmt.Errorf("failed to generate nonce: %w", err)
+	if _, err := io.ReadFull(getRandReader(), nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plain), nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	ciphertext := gcm.Seal(nonce, nonce, plain, nil)
+	buf := make([]byte, base64.StdEncoding.EncodedLen(len(ciphertext)))
+	base64.StdEncoding.Encode(buf, ciphertext)
+	return buf, nil
 }
 
-// Decrypt takes a Base64-encoded string (nonce + ciphertext) and a 32-byte key.
-// It returns the original plaintext if the key is valid and the data has not been tampered with.
+// Encrypt takes a plaintext string and a 32-byte key, returning a Base64-encoded string.
+// It wraps EncryptBytes for string-oriented applications while maintaining 100% API compatibility.
+func Encrypt(ctx context.Context, plain string, key []byte) (string, error) {
+	b, err := EncryptBytes(ctx, []byte(plain), key)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// DecryptBytes takes a Base64-encoded byte slice (nonce + ciphertext) and a 32-byte master key.
+// It automatically trims leading/trailing whitespace and newlines from the input without heap string allocations.
 //
 // Data Flow:
-// 1. Decode Base64 string into raw bytes.
-// 2. Initialize AES-GCM with the key.
-// 3. Extract the nonce from the beginning of the data.
-// 4. Decrypt and verify the integrity of the ciphertext.
-func Decrypt(ctx context.Context, encoded string, key []byte) (string, error) {
+// 1. Trim whitespace and newlines from input byte slice using bytes.TrimSpace.
+// 2. Base64 decode raw ciphertext buffer.
+// 3. Validate minimum length against AES-GCM nonce size (12 bytes).
+// 4. Decrypt and authenticate MAC tag using AES-256-GCM.
+// 5. Return original plaintext bytes.
+func DecryptBytes(ctx context.Context, encoded []byte, key []byte) ([]byte, error) {
 	if len(key) != 32 {
-		return "", ErrInvalidKey
+		return nil, ErrInvalidKey
 	}
 
-	data, err := base64.StdEncoding.DecodeString(encoded)
+	cleanEncoded := bytes.TrimSpace(encoded)
+	data := make([]byte, base64.StdEncoding.DecodedLen(len(cleanEncoded)))
+	n, err := base64.StdEncoding.Decode(data, cleanEncoded)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %w", err)
+		return nil, fmt.Errorf("failed to decode base64: %w", err)
 	}
+	data = data[:n]
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("failed to create cipher: %w", err)
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("failed to create GCM: %w", err)
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
 	nonceSize := gcm.NonceSize()
 	if len(data) < nonceSize {
-		return "", ErrCiphertextTooShort
+		return nil, ErrCiphertextTooShort
 	}
 
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return "", fmt.Errorf("decryption failed: %w", err)
+		return nil, fmt.Errorf("decryption failed: %w", err)
 	}
 
-	return string(plaintext), nil
+	return plaintext, nil
+}
+
+// Decrypt takes a Base64-encoded string (nonce + ciphertext) and a 32-byte master key.
+// It wraps DecryptBytes for string-oriented applications while maintaining 100% API compatibility.
+func Decrypt(ctx context.Context, encoded string, key []byte) (string, error) {
+	b, err := DecryptBytes(ctx, []byte(encoded), key)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // validateFilePermissions implements platform-specific security boundaries for key files.
@@ -246,21 +330,32 @@ func Decrypt(ctx context.Context, encoded string, key []byte) (string, error) {
 // - Linux/Unix: Stat the file and check mode. Must be 0400 or 0600.
 // - Windows: Path-based detection for "Public", "\temp\", or "/temp/".
 func validateFilePermissions(path string) error {
-	info, err := OsStat(path)
+	cleanPath := filepath.Clean(path)
+	info, err := getOsStat()(cleanPath)
 	if err != nil {
 		return err
 	}
 
-	if RuntimeGOOS != "windows" {
+	if getRuntimeGOOS() != "windows" {
 		// Linux/Unix security: Ensure owner-only read (0400) or read/write (0600).
 		mode := info.Mode().Perm()
-		if mode != 0400 && mode != 0600 {
+		if mode != 0o400 && mode != 0o600 {
 			return fmt.Errorf("%w: %o (expected 0400 or 0600)", ErrInsecurePermissions, mode)
 		}
 	} else {
-		// Windows security: Check path for insecure shared or volatile locations.
-		lowerPath := strings.ToLower(path)
-		if strings.Contains(lowerPath, "public") || strings.Contains(lowerPath, "\\temp\\") || strings.Contains(lowerPath, "/temp/") {
+		// Windows security: Check path against known insecure public/temp locations.
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			absPath = cleanPath
+		}
+		lowerPath := strings.ToLower(absPath)
+		sysTempDir := strings.ToLower(filepath.Clean(os.TempDir()))
+
+		if strings.HasPrefix(lowerPath, strings.ToLower(filepath.Clean(`C:\Users\Public`))) ||
+			strings.HasPrefix(lowerPath, strings.ToLower(filepath.Clean(`C:\Windows\Temp`))) ||
+			(sysTempDir != "" && strings.HasPrefix(lowerPath, sysTempDir)) ||
+			strings.Contains(lowerPath, `\temp\`) || strings.Contains(lowerPath, `/temp/`) ||
+			strings.Contains(lowerPath, `c:\users\public`) {
 			return fmt.Errorf("%w: %s", ErrInsecureLocation, path)
 		}
 	}

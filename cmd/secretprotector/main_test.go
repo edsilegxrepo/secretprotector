@@ -24,13 +24,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"criticalsys/secretprotector/pkg/libsecsecrets"
+	"criticalsys.net/secretprotector/pkg/libsecsecrets"
 )
 
 // TestMainCLI verifies the CLI flag parsing and basic execution flows.
@@ -121,18 +123,21 @@ func TestCLIEncryptionDecryption(t *testing.T) {
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
 	os.Stdout = w
-	os.Stderr = w
+	os.Stderr = wErr
 	if err := runMain(context.Background()); err != nil {
 		t.Errorf("runMain() error: %v", err)
 	}
 	if err := w.Close(); err != nil {
 		t.Errorf("w.Close() error: %v", err)
 	}
+	_ = wErr.Close()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(r); err != nil {
 		t.Errorf("buf.ReadFrom() error: %v", err)
 	}
+	_ = rErr.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 
@@ -154,18 +159,21 @@ func TestCLIEncryptionDecryption(t *testing.T) {
 	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
 
 	r1e, w1e, _ := os.Pipe()
+	r1eErr, w1eErr, _ := os.Pipe()
 	os.Stdout = w1e
-	os.Stderr = w1e
+	os.Stderr = w1eErr
 	if err := runMain(context.Background()); err != nil {
 		t.Errorf("runMain() error: %v", err)
 	}
 	if err := w1e.Close(); err != nil {
 		t.Errorf("w1e.Close() error: %v", err)
 	}
+	_ = w1eErr.Close()
 	var buf1e bytes.Buffer
 	if _, err := buf1e.ReadFrom(r1e); err != nil {
 		t.Errorf("buf1e.ReadFrom() error: %v", err)
 	}
+	_ = r1eErr.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 	if len(strings.TrimSpace(buf1e.String())) < 20 {
@@ -174,25 +182,28 @@ func TestCLIEncryptionDecryption(t *testing.T) {
 
 	// 1b. Test Encryption via File
 	tmpFile := filepath.Join(t.TempDir(), "key.txt")
-	if err := os.WriteFile(tmpFile, []byte(key), 0600); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(key), 0o600); err != nil {
 		t.Fatalf("os.WriteFile() error: %v", err)
 	}
 	os.Args = []string{"cmd", "-key-file", tmpFile, "-encrypt", plaintext}
 	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
 
 	r1f, w1f, _ := os.Pipe()
+	r1fErr, w1fErr, _ := os.Pipe()
 	os.Stdout = w1f
-	os.Stderr = w1f
+	os.Stderr = w1fErr
 	if err := runMain(context.Background()); err != nil {
 		t.Errorf("runMain() error: %v", err)
 	}
 	if err := w1f.Close(); err != nil {
 		t.Errorf("w1f.Close() error: %v", err)
 	}
+	_ = w1fErr.Close()
 	var buf1f bytes.Buffer
 	if _, err := buf1f.ReadFrom(r1f); err != nil {
 		t.Errorf("buf1f.ReadFrom() error: %v", err)
 	}
+	_ = r1fErr.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 	if len(strings.TrimSpace(buf1f.String())) < 20 {
@@ -204,24 +215,108 @@ func TestCLIEncryptionDecryption(t *testing.T) {
 	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
 
 	r2, w2, _ := os.Pipe()
+	r2Err, w2Err, _ := os.Pipe()
 	os.Stdout = w2
-	os.Stderr = w2
+	os.Stderr = w2Err
 	if err := runMain(context.Background()); err != nil {
 		t.Errorf("runMain() error: %v", err)
 	}
 	if err := w2.Close(); err != nil {
 		t.Errorf("w2.Close() error: %v", err)
 	}
+	_ = w2Err.Close()
 	var buf2 bytes.Buffer
 	if _, err := buf2.ReadFrom(r2); err != nil {
 		t.Errorf("buf2.ReadFrom() error: %v", err)
 	}
+	_ = r2Err.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
 
 	decrypted := strings.TrimSpace(buf2.String())
 	if decrypted != plaintext {
 		t.Errorf("Decryption failed: expected %q, got %q", plaintext, decrypted)
+	}
+}
+
+// TestCLIStdinStream verifies pipe and stdin streaming integration.
+func TestCLIStdinStream(t *testing.T) {
+	key, _ := libsecsecrets.GenerateKey()
+	plaintext := "stdin-secret-789"
+
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	defer func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
+
+	// 1. Test Encrypt via Stdin (-encrypt -)
+	rIn, wIn, _ := os.Pipe()
+	go func() {
+		_, _ = wIn.WriteString(plaintext + "\n")
+		_ = wIn.Close()
+	}()
+	os.Stdin = rIn
+
+	rOut, wOut, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
+	os.Stdout = wOut
+	os.Stderr = wErr
+
+	os.Args = []string{"cmd", "-key", key, "-encrypt", "-"}
+	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
+
+	if err := runMain(context.Background()); err != nil {
+		t.Fatalf("runMain encrypt stdin error: %v", err)
+	}
+	_ = wOut.Close()
+	_ = wErr.Close()
+
+	var bufOut bytes.Buffer
+	_, _ = bufOut.ReadFrom(rOut)
+	_ = rIn.Close()
+	_ = rOut.Close()
+	_ = rErr.Close()
+
+	encryptedStdin := strings.TrimSpace(bufOut.String())
+	if len(encryptedStdin) < 20 {
+		t.Fatalf("Encryption via Stdin failed, output too short: %q", encryptedStdin)
+	}
+
+	// 2. Test Decrypt via Stdin (-decrypt -)
+	rIn2, wIn2, _ := os.Pipe()
+	go func() {
+		_, _ = wIn2.WriteString(encryptedStdin + "\n")
+		_ = wIn2.Close()
+	}()
+	os.Stdin = rIn2
+
+	rOut2, wOut2, _ := os.Pipe()
+	rErr2, wErr2, _ := os.Pipe()
+	os.Stdout = wOut2
+	os.Stderr = wErr2
+
+	os.Args = []string{"cmd", "-key", key, "-decrypt", "-"}
+	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
+
+	if err := runMain(context.Background()); err != nil {
+		t.Fatalf("runMain decrypt stdin error: %v", err)
+	}
+	_ = wOut2.Close()
+	_ = wErr2.Close()
+
+	var bufOut2 bytes.Buffer
+	_, _ = bufOut2.ReadFrom(rOut2)
+	_ = rIn2.Close()
+	_ = rOut2.Close()
+	_ = rErr2.Close()
+
+	decryptedStdin := strings.TrimSpace(bufOut2.String())
+	if decryptedStdin != plaintext {
+		t.Errorf("Decryption via Stdin failed: expected %q, got %q", plaintext, decryptedStdin)
 	}
 }
 
@@ -235,28 +330,49 @@ func TestCLIErrorPaths(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name string
-		args []string
+		name         string
+		args         []string
+		expectedCode int
 	}{
 		{
-			name: "Encrypt without key",
-			args: []string{"cmd", "-encrypt", "secret", "-key-env", "NON_EXISTENT_ENV"},
+			name:         "Encrypt without key",
+			args:         []string{"cmd", "-encrypt", "secret", "-key-env", "NON_EXISTENT_ENV"},
+			expectedCode: ExitKeyResolutionError,
 		},
 		{
-			name: "Decrypt with invalid key",
-			args: []string{"cmd", "-key", "invalid", "-decrypt", "base64"},
+			name:         "Decrypt with invalid key",
+			args:         []string{"cmd", "-key", "invalid", "-decrypt", "base64"},
+			expectedCode: ExitKeyResolutionError,
 		},
 		{
-			name: "Decrypt with invalid base64",
-			args: []string{"cmd", "-key", strings.Repeat("a", 64), "-decrypt", "!!!@#$"},
+			name:         "Decrypt with invalid base64",
+			args:         []string{"cmd", "-key", strings.Repeat("a", 64), "-decrypt", "!!!@#$"},
+			expectedCode: ExitCryptoError,
 		},
 		{
-			name: "Encryption failure (mocked error)",
-			args: []string{"cmd", "-key", strings.Repeat("a", 64), "-encrypt", "secret"},
+			name:         "Encryption failure (mocked error)",
+			args:         []string{"cmd", "-key", strings.Repeat("a", 64), "-encrypt", "secret"},
+			expectedCode: ExitCryptoError,
 		},
 		{
-			name: "Decryption failure (mocked error)",
-			args: []string{"cmd", "-key", strings.Repeat("a", 64), "-decrypt", "A1B2C3D4"},
+			name:         "Decryption failure (mocked error)",
+			args:         []string{"cmd", "-key", strings.Repeat("a", 64), "-decrypt", "A1B2C3D4"},
+			expectedCode: ExitCryptoError,
+		},
+		{
+			name:         "Mutually exclusive flags",
+			args:         []string{"cmd", "-generate", "-encrypt", "secret"},
+			expectedCode: ExitUsageError,
+		},
+		{
+			name:         "Stdin secret and key collision",
+			args:         []string{"cmd", "-encrypt", "-", "-key-file", "-"},
+			expectedCode: ExitUsageError,
+		},
+		{
+			name:         "Key file error",
+			args:         []string{"cmd", "-encrypt", "secret", "-key-file", "non_existent_key_file.txt"},
+			expectedCode: ExitKeyResolutionError,
 		},
 	}
 
@@ -270,9 +386,8 @@ func TestCLIErrorPaths(t *testing.T) {
 
 			// Mock library errors for specific test cases
 			if tt.name == "Encryption failure (mocked error)" {
-				oldRand := libsecsecrets.RandReader
 				libsecsecrets.RandReader = strings.NewReader("") // Cause nonce gen failure
-				defer func() { libsecsecrets.RandReader = oldRand }()
+				defer func() { libsecsecrets.RandReader = rand.Reader }()
 			}
 
 			err := runMain(context.Background())
@@ -286,6 +401,9 @@ func TestCLIErrorPaths(t *testing.T) {
 			}
 			if err == nil {
 				t.Errorf("Expected error for %s, but got nil", tt.name)
+			}
+			if code := exitCode(err); code != tt.expectedCode {
+				t.Errorf("Expected exit code %d for %s, got %d", tt.expectedCode, tt.name, code)
 			}
 			if buf.Len() == 0 {
 				t.Errorf("Expected error output for %s, but got none", tt.name)
@@ -302,12 +420,37 @@ func TestCLIGenerateError(t *testing.T) {
 	os.Args = []string{"cmd", "-generate"}
 	flag.CommandLine = flag.NewFlagSet("cmd", flag.ContinueOnError)
 
-	oldRand := libsecsecrets.RandReader
 	libsecsecrets.RandReader = strings.NewReader("") // Cause key gen failure
-	defer func() { libsecsecrets.RandReader = oldRand }()
+	defer func() { libsecsecrets.RandReader = rand.Reader }()
 
 	err := runMain(context.Background())
 	if err == nil {
 		t.Error("Expected error from runMain when key generation fails, but got nil")
+	}
+	if code := exitCode(err); code != ExitCryptoError {
+		t.Errorf("Expected ExitCryptoError (%d), got %d", ExitCryptoError, code)
+	}
+}
+
+// TestExitErrorMethods tests exitError helper methods and exitCode mapping.
+func TestExitErrorMethods(t *testing.T) {
+	if code := exitCode(nil); code != ExitSuccess {
+		t.Errorf("Expected ExitSuccess for nil error, got %d", code)
+	}
+
+	stdErr := errors.New("standard error")
+	if code := exitCode(stdErr); code != 1 {
+		t.Errorf("Expected code 1 for generic error, got %d", code)
+	}
+
+	customErr := &exitError{code: ExitIOError, err: stdErr}
+	if customErr.Error() != "standard error" {
+		t.Errorf("Expected customErr.Error() to be 'standard error', got %q", customErr.Error())
+	}
+	if !errors.Is(customErr, stdErr) {
+		t.Errorf("Expected customErr.Unwrap() to match stdErr")
+	}
+	if code := exitCode(customErr); code != ExitIOError {
+		t.Errorf("Expected code ExitIOError for customErr, got %d", code)
 	}
 }

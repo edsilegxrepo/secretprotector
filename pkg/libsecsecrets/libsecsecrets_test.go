@@ -84,6 +84,31 @@ func TestEncryptDecrypt(t *testing.T) {
 	}
 }
 
+// TestEncryptDecryptBytes verifies byte-slice cryptographic round-trip and trimming.
+func TestEncryptDecryptBytes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	key, _ := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	plainBytes := []byte("binary_secret_data_456")
+
+	encryptedBytes, err := EncryptBytes(ctx, plainBytes, key)
+	if err != nil {
+		t.Fatalf("EncryptBytes failed: %v", err)
+	}
+
+	// Test trimming capability by appending whitespace/newlines
+	paddedEncrypted := append([]byte(" \r\n "), append(encryptedBytes, []byte(" \n\r ")...)...)
+
+	decryptedBytes, err := DecryptBytes(ctx, paddedEncrypted, key)
+	if err != nil {
+		t.Fatalf("DecryptBytes failed on padded input: %v", err)
+	}
+
+	if string(decryptedBytes) != string(plainBytes) {
+		t.Errorf("Decrypted bytes do not match plaintext: got %s, want %s", string(decryptedBytes), string(plainBytes))
+	}
+}
+
 // TestResolveKeyPrecedence verifies the hierarchical key resolution logic:
 // Flag (Raw) > Environment Variable > File Path.
 func TestResolveKeyPrecedence(t *testing.T) {
@@ -105,7 +130,7 @@ func TestResolveKeyPrecedence(t *testing.T) {
 	envKey := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	fileKey := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
-	_ = os.WriteFile(keyFile, []byte(fileKey), 0600)
+	_ = os.WriteFile(keyFile, []byte(fileKey), 0o600)
 	if err := os.Setenv("TEST_MASTER_KEY", envKey); err != nil {
 		t.Fatalf("Failed to set env: %v", err)
 	}
@@ -191,7 +216,7 @@ func TestInsecureFilePermissions(t *testing.T) {
 
 	// Mock insecure permissions
 	OsStat = func(name string) (os.FileInfo, error) {
-		return &mockFileInfo{mode: 0644}, nil
+		return &mockFileInfo{mode: 0o644}, nil
 	}
 
 	_, err = ResolveKey(ctx, "", "", "/tmp/insecure.txt")
@@ -201,7 +226,7 @@ func TestInsecureFilePermissions(t *testing.T) {
 
 	// Mock secure permissions (0600)
 	OsStat = func(name string) (os.FileInfo, error) {
-		return &mockFileInfo{mode: 0600}, nil
+		return &mockFileInfo{mode: 0o600}, nil
 	}
 	// Mock OsReadFile to avoid "file not found" errors when ResolveKey tries to read the key
 	oldReadFile := OsReadFile
@@ -217,7 +242,7 @@ func TestInsecureFilePermissions(t *testing.T) {
 
 	// Mock secure permissions (0400)
 	OsStat = func(name string) (os.FileInfo, error) {
-		return &mockFileInfo{mode: 0400}, nil
+		return &mockFileInfo{mode: 0o400}, nil
 	}
 	_, err = ResolveKey(ctx, "", "", "/tmp/secure0400.txt")
 	if err != nil {
@@ -242,7 +267,7 @@ func TestResolveKeyFileVariants(t *testing.T) {
 		t.Fatalf("failed to get wd: %v", err)
 	}
 	testDir := filepath.Join(wd, "testdata_variants")
-	if err := os.MkdirAll(testDir, 0700); err != nil {
+	if err := os.MkdirAll(testDir, 0o700); err != nil {
 		t.Fatalf("failed to create test dir: %v", err)
 	}
 	defer func() {
@@ -252,7 +277,7 @@ func TestResolveKeyFileVariants(t *testing.T) {
 	// 1. Test 64-char hex key from file
 	hexKey := strings.Repeat("a", 64)
 	hexFile := filepath.Join(testDir, "hex.txt")
-	if err := os.WriteFile(hexFile, []byte(hexKey), 0600); err != nil {
+	if err := os.WriteFile(hexFile, []byte(hexKey), 0o600); err != nil {
 		t.Fatalf("failed to write hex file: %v", err)
 	}
 	resolved, err := ResolveKey(ctx, "", "", hexFile)
@@ -266,7 +291,7 @@ func TestResolveKeyFileVariants(t *testing.T) {
 	// 2. Test 32-byte raw key from file
 	rawKey := strings.Repeat("r", 32)
 	rawFile := filepath.Join(testDir, "raw.txt")
-	if err := os.WriteFile(rawFile, []byte(rawKey), 0600); err != nil {
+	if err := os.WriteFile(rawFile, []byte(rawKey), 0o600); err != nil {
 		t.Fatalf("failed to write raw file: %v", err)
 	}
 	resolved, err = ResolveKey(ctx, "", "", rawFile)
@@ -378,5 +403,42 @@ func TestErrors(t *testing.T) {
 	_, err = ResolveKey(ctx, "", "", "fail-read.txt")
 	if err == nil {
 		t.Error("Expected error from ResolveKey when Os.ReadFile fails, but got none")
+	}
+
+	// 6. Test EncryptBytes and DecryptBytes invalid key size errors
+	_, err = EncryptBytes(ctx, []byte("plain"), []byte("short"))
+	if !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("Expected ErrInvalidKey from EncryptBytes, got: %v", err)
+	}
+
+	_, err = DecryptBytes(ctx, []byte("encoded"), []byte("short"))
+	if !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("Expected ErrInvalidKey from DecryptBytes, got: %v", err)
+	}
+}
+
+// TestResolveKeyStdin verifies key resolution from os.Stdin when file argument is "-".
+func TestResolveKeyStdin(t *testing.T) {
+	ctx := context.Background()
+	key := strings.Repeat("a", 64)
+
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	go func() {
+		_, _ = w.WriteString(key + "\n")
+		_ = w.Close()
+	}()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		_ = r.Close()
+	}()
+
+	resolved, err := ResolveKey(ctx, "", "", "-")
+	if err != nil {
+		t.Fatalf("ResolveKey from stdin failed: %v", err)
+	}
+	if hex.EncodeToString(resolved) != key {
+		t.Errorf("Expected resolved key %s, got %x", key, resolved)
 	}
 }
