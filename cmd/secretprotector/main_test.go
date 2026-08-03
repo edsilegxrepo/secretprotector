@@ -32,7 +32,7 @@ import (
 	"strings"
 	"testing"
 
-	"criticalsys.net/secretprotector/pkg/libsecsecrets"
+	"github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets"
 )
 
 // TestMainCLI verifies the CLI flag parsing and basic execution flows.

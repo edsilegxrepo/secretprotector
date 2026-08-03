@@ -1,3 +1,3 @@
-module criticalsys.net/secretprotector
+module github.com/edsilegxrepo/secretprotector
 
 go 1.25.0

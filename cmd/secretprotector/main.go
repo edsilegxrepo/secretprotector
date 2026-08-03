@@ -29,7 +29,7 @@ import (
 	"os"
 	"strings"
 
-	"criticalsys.net/secretprotector/pkg/libsecsecrets"
+	"github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets"
 )
 
 // Exit code constants returned by SecretProtector to provide granular error diagnostic statuses:
