@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.4] - 2026-08-04
+
+### Changed
+- **Version bump**: Re-released v0.0.3 changes as v0.0.4 due to Go module proxy caching issue.
+
+---
+
 ## [0.0.3] - 2026-08-04
 
 ### Changed
