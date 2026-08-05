@@ -130,7 +130,7 @@ graph TD
     subgraph Obfuscation
         G[Plaintext Secret] -->|encrypt| H("CLI: secretprotector -encrypt")
         E & F -.->|ResolveKey| H
-        H -->|AES-256-GCM| I[Base64 Ciphertext]
+        H -->|AES-256-GCM| I[v1:gcm: Ciphertext]
     end
 
     subgraph Runtime

@@ -129,6 +129,22 @@ func getRuntimeGOOS() string {
 // DefaultKeyEnv is the default environment variable name used to store the master key.
 const DefaultKeyEnv = "SECRETPROTECTOR_MASTER_KEY"
 
+// EncryptedPrefix is the version/algorithm prefix for encrypted values.
+// Format: v1:gcm:<base64-ciphertext>
+// - v1: Version identifier for future algorithm upgrades
+// - gcm: Algorithm identifier (AES-256-GCM)
+const EncryptedPrefix = "v1:gcm:"
+
+// IsEncrypted checks if a string or byte slice has the v1:gcm: encrypted prefix.
+func IsEncrypted(s string) bool {
+	return len(s) > len(EncryptedPrefix) && s[:len(EncryptedPrefix)] == EncryptedPrefix
+}
+
+// IsEncryptedBytes checks if a byte slice has the v1:gcm: encrypted prefix.
+func IsEncryptedBytes(b []byte) bool {
+	return len(b) > len(EncryptedPrefix) && string(b[:len(EncryptedPrefix)]) == EncryptedPrefix
+}
+
 // GenerateKey returns a 64-character hex string representing 32 bytes of entropy.
 // It uses crypto/rand for cryptographically secure random number generation.
 //
@@ -219,15 +235,15 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 	return key, nil
 }
 
-// EncryptBytes takes a plaintext byte slice and a 32-byte master key, returning Base64-encoded bytes (nonce + ciphertext).
-// Objective: Provide a memory-safe cryptographic primitive operating on byte slices to allow caller-managed zeroing.
+// EncryptBytes takes a plaintext byte slice and a 32-byte master key, returning prefixed Base64-encoded bytes.
+// Output format: v1:gcm:<base64(nonce + ciphertext)>
 //
 // Data Flow:
 // 1. Validate key length (must be exactly 32 bytes).
 // 2. Initialize AES-256 block cipher and GCM mode.
 // 3. Generate a 12-byte CSPRNG nonce.
 // 4. Encrypt and seal payload, prepending nonce.
-// 5. Base64 encode output into a new byte buffer.
+// 5. Base64 encode and prepend v1:gcm: prefix.
 func EncryptBytes(ctx context.Context, plain []byte, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKey
@@ -249,13 +265,15 @@ func EncryptBytes(ctx context.Context, plain []byte, key []byte) ([]byte, error)
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, plain, nil)
-	buf := make([]byte, base64.StdEncoding.EncodedLen(len(ciphertext)))
-	base64.StdEncoding.Encode(buf, ciphertext)
+	base64Len := base64.StdEncoding.EncodedLen(len(ciphertext))
+	buf := make([]byte, len(EncryptedPrefix)+base64Len)
+	copy(buf, EncryptedPrefix)
+	base64.StdEncoding.Encode(buf[len(EncryptedPrefix):], ciphertext)
 	return buf, nil
 }
 
-// Encrypt takes a plaintext string and a 32-byte key, returning a Base64-encoded string.
-// It wraps EncryptBytes for string-oriented applications while maintaining 100% API compatibility.
+// Encrypt takes a plaintext string and a 32-byte key, returning a prefixed Base64-encoded string.
+// Output format: v1:gcm:<base64(nonce + ciphertext)>
 func Encrypt(ctx context.Context, plain string, key []byte) (string, error) {
 	b, err := EncryptBytes(ctx, []byte(plain), key)
 	if err != nil {
@@ -264,21 +282,27 @@ func Encrypt(ctx context.Context, plain string, key []byte) (string, error) {
 	return string(b), nil
 }
 
-// DecryptBytes takes a Base64-encoded byte slice (nonce + ciphertext) and a 32-byte master key.
-// It automatically trims leading/trailing whitespace and newlines from the input without heap string allocations.
+// DecryptBytes takes a prefixed or raw Base64-encoded byte slice and a 32-byte master key.
+// Accepts both v1:gcm: prefixed values (new format) and raw base64 (backwards compatible).
 //
 // Data Flow:
-// 1. Trim whitespace and newlines from input byte slice using bytes.TrimSpace.
-// 2. Base64 decode raw ciphertext buffer.
-// 3. Validate minimum length against AES-GCM nonce size (12 bytes).
-// 4. Decrypt and authenticate MAC tag using AES-256-GCM.
-// 5. Return original plaintext bytes.
+// 1. Strip v1:gcm: prefix if present.
+// 2. Trim whitespace and newlines from input byte slice.
+// 3. Base64 decode raw ciphertext buffer.
+// 4. Validate minimum length against AES-GCM nonce size (12 bytes).
+// 5. Decrypt and authenticate MAC tag using AES-256-GCM.
+// 6. Return original plaintext bytes.
 func DecryptBytes(ctx context.Context, encoded []byte, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKey
 	}
 
+	// Trim whitespace first, then strip v1:gcm: prefix if present (backwards compatible with raw base64)
 	cleanEncoded := bytes.TrimSpace(encoded)
+	if IsEncryptedBytes(cleanEncoded) {
+		cleanEncoded = cleanEncoded[len(EncryptedPrefix):]
+	}
+
 	data := make([]byte, base64.StdEncoding.DecodedLen(len(cleanEncoded)))
 	n, err := base64.StdEncoding.Decode(data, cleanEncoded)
 	if err != nil {
@@ -310,8 +334,8 @@ func DecryptBytes(ctx context.Context, encoded []byte, key []byte) ([]byte, erro
 	return plaintext, nil
 }
 
-// Decrypt takes a Base64-encoded string (nonce + ciphertext) and a 32-byte master key.
-// It wraps DecryptBytes for string-oriented applications while maintaining 100% API compatibility.
+// Decrypt takes a prefixed or raw Base64-encoded string and a 32-byte master key.
+// Accepts both v1:gcm: prefixed values (new format) and raw base64 (backwards compatible).
 func Decrypt(ctx context.Context, encoded string, key []byte) (string, error) {
 	b, err := DecryptBytes(ctx, []byte(encoded), key)
 	if err != nil {

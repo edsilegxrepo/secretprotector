@@ -16,8 +16,9 @@ The library is the single source of truth for cryptographic operations.
 | :--- | :--- | :--- | :--- |
 | `GenerateKey()` | None | `(string, error)` | Returns a 64-char hex string (32 bytes of entropy). Uses `sync.Pool` for efficiency. |
 | `ResolveKey(ctx, raw, env, file)` | `Context`, Strings | `([]byte, error)` | Finds and validates the key from 3 sources: CLI flag, environment variable, or file path. Supports 64-char hex or 32-byte raw. Enforces platform security. |
-| `Encrypt(ctx, plain, key)` | `Context, string, []byte` | `(string, error)` | Returns a Base64 string containing `nonce + ciphertext`. |
-| `Decrypt(ctx, base64, key)` | `Context, string, []byte` | `(string, error)` | Extracts nonce, decrypts, and returns plaintext. |
+| `Encrypt(ctx, plain, key)` | `Context, string, []byte` | `(string, error)` | Returns `v1:gcm:<base64(nonce + ciphertext)>`. |
+| `Decrypt(ctx, encoded, key)` | `Context, string, []byte` | `(string, error)` | Strips prefix, extracts nonce, decrypts, returns plaintext. Accepts with or without `v1:gcm:` prefix. |
+| `IsEncrypted(s)` | `string` | `bool` | Returns true if string has `v1:gcm:` prefix. |
 | `ZeroBuffer(b)` | `[]byte` | None | Securely clears sensitive data from memory. |
 
 ---
@@ -34,8 +35,8 @@ A standalone utility for developers and system administrators to manage secrets.
 ### Developer Workflow Example
 1.  **Generate:** `secretprotector -generate` Copy the Hex string.
 2.  **Store:** Save Hex string in `SECRETPROTECTOR_MASTER_KEY` environment variable.
-3.  **Obfuscate:** `secretprotector -encrypt "sftp_password_123"` Copy Base64 result.
-4.  **Configure:** Paste Base64 result into `config.json`.
+3.  **Obfuscate:** `secretprotector -encrypt "sftp_password_123"` Copy `v1:gcm:...` result.
+4.  **Configure:** Paste `v1:gcm:...` result into `config.json`.
 
 ---
 

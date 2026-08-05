@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.3] - 2026-08-04
+
+### Changed
+- **v1:gcm: Encrypted Prefix**: `Encrypt()`/`EncryptBytes()` now output `v1:gcm:<base64>` format for versioned algorithm identification. `Decrypt()`/`DecryptBytes()` accept both prefixed and raw base64 for backwards compatibility.
+- **IsEncrypted() Helper**: Added `IsEncrypted(string)` and `IsEncryptedBytes([]byte)` to check for `v1:gcm:` prefix.
+
+---
+
 ## [0.0.2] - 2026-07-30
 
 ### Added

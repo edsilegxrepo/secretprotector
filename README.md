@@ -107,12 +107,12 @@ Encrypt a secret (e.g., an SFTP password) by providing the key directly on the c
 
 **Windows (PowerShell) or Linux/Unix (Bash):**
 ```powershell
-# Use a 64-character hex string as the key - Output: Base64 string (nonce + ciphertext)
+# Use a 64-character hex string as the key - Output: v1:gcm:<base64(nonce + ciphertext)>
 go run ./cmd/secretprotector -key "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f" -encrypt "your_secret_here"
 # Output:
 # Warning: Passing sensitive master keys directly via CLI flags risks process listing exposure (ps aux). Prefer -key-env or -key-file.
 # Warning: Passing plaintext secrets directly via CLI flags risks process listing exposure (ps aux). Prefer stdin (-encrypt -).
-# A1B2C3D4... (Base64 string)
+# v1:gcm:A1B2C3D4...
 
 # The -key flag also supports a 32-character raw string (less common)
 go run ./cmd/secretprotector -key "a_32_character_long_secret_str!!" -encrypt "your_secret_here"
