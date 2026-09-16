@@ -244,7 +244,7 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 // 3. Generate a 12-byte CSPRNG nonce.
 // 4. Encrypt and seal payload, prepending nonce.
 // 5. Base64 encode and prepend v1:gcm: prefix.
-func EncryptBytes(ctx context.Context, plain []byte, key []byte) ([]byte, error) {
+func EncryptBytes(ctx context.Context, plain, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKey
 	}
@@ -292,7 +292,7 @@ func Encrypt(ctx context.Context, plain string, key []byte) (string, error) {
 // 4. Validate minimum length against AES-GCM nonce size (12 bytes).
 // 5. Decrypt and authenticate MAC tag using AES-256-GCM.
 // 6. Return original plaintext bytes.
-func DecryptBytes(ctx context.Context, encoded []byte, key []byte) ([]byte, error) {
+func DecryptBytes(ctx context.Context, encoded, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKey
 	}
