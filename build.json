@@ -1,0 +1,18 @@
+{
+  "name": "secretprotector",
+  "version": "0.0.4",
+  "release": "1",
+  "channel": "xg",
+  "entrypoint": "./cmd/secretprotector",
+  "version_pkg": "main.version",
+  "build_pkg": "",
+  "summary": "Secret and credential obfuscation encryption utility",
+  "description": "Encryption and obfuscation tool for passwords and sensitive configuration strings in enterprise systems.",
+  "maintainer": "Mis Center <support@criticalsys.net>",
+  "license": "MIT",
+  "url": "https://criticalsys.net",
+  "section": "utils",
+  "priority": "optional",
+  "install_path": "/usr/bin",
+  "cgo": false
+}
