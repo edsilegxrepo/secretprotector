@@ -26,6 +26,7 @@
 package libsecsecrets
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -300,6 +301,50 @@ func TestResolveKeyFileVariants(t *testing.T) {
 	}
 	if string(resolved) != rawKey {
 		t.Errorf("Expected %s, got %s", rawKey, string(resolved))
+	}
+
+	// 3. Test 32-byte raw key from file with leading space byte.
+	leadingSpaceKey, err := hex.DecodeString("2006a25c6760dc2da911ea11464b57bfb762e95b958fc31b5266660f5646c919")
+	if err != nil {
+		t.Fatalf("failed to decode leading-space raw key: %v", err)
+	}
+	leadingSpaceFile := filepath.Join(testDir, "raw-leading-space.bin")
+	if err := os.WriteFile(leadingSpaceFile, leadingSpaceKey, 0o600); err != nil {
+		t.Fatalf("failed to write leading-space raw file: %v", err)
+	}
+	resolved, err = ResolveKey(ctx, "", "", leadingSpaceFile)
+	if err != nil {
+		t.Fatalf("ResolveKey failed for leading-space raw file: %v", err)
+	}
+	if !bytes.Equal(resolved, leadingSpaceKey) {
+		t.Errorf("Expected %x, got %x", leadingSpaceKey, resolved)
+	}
+
+	// 4. Test 32-byte raw key from file with trailing space byte.
+	trailingSpaceKey := append(bytes.Repeat([]byte{0x42}, 31), 0x20)
+	trailingSpaceFile := filepath.Join(testDir, "raw-trailing-space.bin")
+	if err := os.WriteFile(trailingSpaceFile, trailingSpaceKey, 0o600); err != nil {
+		t.Fatalf("failed to write trailing-space raw file: %v", err)
+	}
+	resolved, err = ResolveKey(ctx, "", "", trailingSpaceFile)
+	if err != nil {
+		t.Fatalf("ResolveKey failed for trailing-space raw file: %v", err)
+	}
+	if !bytes.Equal(resolved, trailingSpaceKey) {
+		t.Errorf("Expected %x, got %x", trailingSpaceKey, resolved)
+	}
+
+	// 5. Test 64-char hex key with trailing newline still resolves as hex text.
+	hexWithNewlineFile := filepath.Join(testDir, "hex-newline.txt")
+	if err := os.WriteFile(hexWithNewlineFile, []byte(hexKey+"\n"), 0o600); err != nil {
+		t.Fatalf("failed to write hex newline file: %v", err)
+	}
+	resolved, err = ResolveKey(ctx, "", "", hexWithNewlineFile)
+	if err != nil {
+		t.Fatalf("ResolveKey failed for hex newline file: %v", err)
+	}
+	if hex.EncodeToString(resolved) != hexKey {
+		t.Errorf("Expected %s, got %x", hexKey, resolved)
 	}
 }
 

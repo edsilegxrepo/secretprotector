@@ -183,6 +183,8 @@ func GenerateKey() (string, error) {
 // - On Windows, it prevents reading from insecure locations like "Public" or "Temp" directories.
 func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 	var keyStr string
+	var keyData []byte
+	fromFile := false
 
 	// Step 1: Check for raw key override.
 	if raw != "" {
@@ -194,10 +196,10 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 
 	// Step 3: Fallback to file resolution if still not found.
 	if keyStr == "" && file != "" {
-		var data []byte
 		var err error
+		fromFile = true
 		if file == "-" {
-			data, err = io.ReadAll(os.Stdin)
+			keyData, err = io.ReadAll(os.Stdin)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read key file from stdin: %w", err)
 			}
@@ -205,15 +207,15 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 			if err := validateFilePermissions(file); err != nil {
 				return nil, err
 			}
-			data, err = getOsReadFile()(file)
+			keyData, err = getOsReadFile()(file)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read key file: %w", err)
 			}
 		}
-		keyStr = strings.TrimSpace(string(data))
+		keyStr = strings.TrimSpace(string(keyData))
 	}
 
-	if keyStr == "" {
+	if keyStr == "" && !fromFile {
 		return nil, ErrNoKeySource
 	}
 
@@ -226,13 +228,19 @@ func ResolveKey(ctx context.Context, raw, env, file string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidKey, err)
 		}
-	} else if len(keyStr) == 32 {
-		key = []byte(keyStr)
-	} else {
-		return nil, fmt.Errorf("%w: got %d chars", ErrInvalidKey, len(keyStr))
+		return key, nil
 	}
-
-	return key, nil
+	if len(keyStr) == 32 && !fromFile {
+		return []byte(keyStr), nil
+	}
+	if fromFile && len(keyData) == 32 {
+		key = append([]byte(nil), keyData...)
+		return key, nil
+	}
+	if len(keyStr) == 32 {
+		return []byte(keyStr), nil
+	}
+	return nil, fmt.Errorf("%w: got %d chars", ErrInvalidKey, len(keyStr))
 }
 
 // EncryptBytes takes a plaintext byte slice and a 32-byte master key, returning prefixed Base64-encoded bytes.
