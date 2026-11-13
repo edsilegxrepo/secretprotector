@@ -2,16 +2,16 @@ This specification outlines a professional-grade implementation for password and
 
 ---
 
-## 1. Core Cryptographic Library (`libsecsecrets`)
+## 1. Core Cryptographic Library (`pkg/libsecsecrets`)
 
-> [!WARNING]
-> **Breaking Architectural Change (`v0.1.0`+):** The legacy `pkg/` wrapper directory has been removed in alignment with modern Go project layout standards. The cryptographic library now lives directly at the root level (`libsecsecrets/`). All import paths must be updated from `github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets` to `github.com/edsilegxrepo/secretprotector/libsecsecrets`.
+> [!NOTE]
+> **Compatibility Guarantee (`v0.0.x`):** `github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets` remains the active import path for full backwards compatibility with downstream Go applications. Moving `libsecsecrets/` to the repository root (`github.com/edsilegxrepo/secretprotector/libsecsecrets`) and introducing the 3-tier `ChainedProvider` below are **Proposed Future Roadmap (`v0.1.0+`)** items.
 
-The library (`github.com/edsilegxrepo/secretprotector/libsecsecrets`) is the single source of truth for cryptographic operations and AES-256-GCM symmetric obfuscation (`v1:gcm:...`).
+The library (`github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets`) is the single source of truth for cryptographic operations and AES-256-GCM symmetric obfuscation (`v1:gcm:...`).
 
 ### Core Requirements
-* **Algorithm:** AES-256-GCM (Galois/Counter Mode) for authenticated encryption.
-* **Key Handling:** Must support 32-byte raw strings or 64-character hex strings.
+* **Algorithm:** AES-256-GCM (Galois/Counter Mode) for authenticated encryption, with optional Additional Authenticated Data (`*WithAAD`).
+* **Key Handling:** Must support 32-byte raw keys (including 32-char Base64URL CSPRNG keys) or 64-character hex strings.
 * **Randomness:** Use `crypto/rand` for all key and nonce generation.
 * **Encapsulation:** The library should not log or print any sensitive data to `stdout`.
 
@@ -19,11 +19,15 @@ The library (`github.com/edsilegxrepo/secretprotector/libsecsecrets`) is the sin
 | Function | Input | Output | Purpose |
 | :--- | :--- | :--- | :--- |
 | `GenerateKey()` | None | `(string, error)` | Returns a 64-char hex string (32 bytes of entropy). Uses `sync.Pool` for efficiency. |
+| `GenerateRawKey()` | None | `(string, error)` | Returns a 32-char printable Base64URL CSPRNG key (24 random bytes, 192-bit entropy). |
+| `GenerateKeyBytes()` | None | `([]byte, error)` | Returns 32 raw CSPRNG bytes in memory for caller-managed zeroing. |
 | `ResolveKey(ctx, raw, env, file)` | `Context`, Strings | `([]byte, error)` | Finds and validates the key from 3 sources: CLI flag, environment variable, or file path. Supports 64-char hex or 32-byte raw. Enforces platform security. |
-| `Encrypt(ctx, plain, key)` | `Context, string, []byte` | `(string, error)` | Returns `v1:gcm:<base64(nonce + ciphertext)>`. |
-| `Decrypt(ctx, encoded, key)` | `Context, string, []byte` | `(string, error)` | Strips prefix, extracts nonce, decrypts, returns plaintext. Accepts with or without `v1:gcm:` prefix. |
-| `IsEncrypted(s)` | `string` | `bool` | Returns true if string has `v1:gcm:` prefix. |
-| `ZeroBuffer(b)` | `[]byte` | None | Securely clears sensitive data from memory. |
+| `Encrypt(ctx, plain, key)` / `EncryptBytes(ctx, plain, key)` | `Context`, `string`/`[]byte`, `[]byte` | `(string, error)` / `([]byte, error)` | Returns `v1:gcm:<base64(nonce + ciphertext)>` (`nil` AAD). |
+| `EncryptWithAAD(...)` / `EncryptBytesWithAAD(...)` | `Context`, payload, `key`, `aad` | `(string, error)` / `([]byte, error)` | AES-256-GCM encryption binding optional AAD context metadata. |
+| `Decrypt(ctx, encoded, key)` / `DecryptBytes(ctx, encoded, key)` | `Context`, `string`/`[]byte`, `[]byte` | `(string, error)` / `([]byte, error)` | Strips prefix, extracts nonce, decrypts, returns plaintext. Accepts with or without `v1:gcm:` prefix. |
+| `DecryptWithAAD(...)` / `DecryptBytesWithAAD(...)` | `Context`, ciphertext, `key`, `aad` | `(string, error)` / `([]byte, error)` | Authenticated decryption verifying optional AAD context metadata. |
+| `IsEncrypted(s)` / `IsEncryptedBytes(b)` | `string` / `[]byte` | `bool` | Trims ASCII whitespace and returns true if payload starts with `v1:gcm:` plus ciphertext. |
+| `ZeroBuffer(b)` | `[]byte` | None | Securely clears sensitive data from memory (`clear` + `runtime.KeepAlive`). |
 
 ---
 
@@ -105,7 +109,10 @@ sequenceDiagram
 
 ---
 
-## 5. The 3-Tier Provider Architecture for `secretprotector`
+## 5. Proposed Future Roadmap (`v0.1.0+`): The 3-Tier Provider Architecture
+
+> [!NOTE]
+> Sections 5 and 6 describe the proposed `v0.1.0+` extensible `ChainedProvider` roadmap and are **not** yet implemented in `v0.0.6`.
 
 The `secretprotector` architecture supports two complementary operational modes:
 * **Mode A (Direct Secret Resolution):** `ChainedProvider.GetSecret(ctx, "DB_PASSWORD")` resolves raw secrets directly across Tier 1 (OS Keyring), Tier 2 (Age / PKCS#12 File Vault), or Tier 3 (Cloud KMS / Vault).
@@ -174,6 +181,9 @@ func (p *Provider) GetSecret(ctx context.Context, key string) ([]byte, error) {
 		credDir := os.Getenv("CREDENTIALS_DIRECTORY")
 		if credDir == "" {
 			return nil, fmt.Errorf("systemd CREDENTIALS_DIRECTORY not set")
+		}
+		if key == "" || key == "." || key == ".." || filepath.Base(key) != key || strings.ContainsAny(key, `/\`) {
+			return nil, fmt.Errorf("invalid secret credential name %q", key)
 		}
 		return os.ReadFile(filepath.Join(credDir, key))
 
@@ -483,9 +493,9 @@ func main() {
 
 ```
 
-## 6. Package Structure
+## 6. Proposed Future Roadmap (`v0.1.0+`): Package Structure
 
-Below is the complete project directory tree for `secretprotector`, designed around a pluggable subpackage architecture to keep core dependencies lean while cleanly isolating the 3 tiers.
+Below is the proposed `v0.1.0+` project directory tree for `secretprotector`, designed around a pluggable subpackage architecture to keep core dependencies lean while cleanly isolating the 3 tiers.
 
 ```text
 secretprotector/

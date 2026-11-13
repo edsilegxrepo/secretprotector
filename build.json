@@ -1,6 +1,6 @@
 {
   "name": "secretprotector",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "release": "1",
   "channel": "xg",
   "entrypoint": "./cmd/secretprotector",
@@ -17,7 +17,7 @@
   "install_path": "/usr/bin",
   "cgo": false,
   "history": [
-    "* Wed Oct 28 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+    "* Thu Nov 12 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
     "- Packaged to new code release"
   ]
 }

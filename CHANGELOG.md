@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.6] - 2026-11-12
+
+### Added
+- **Raw Key Generation API & CLI**: Added `GenerateKeyBytes() ([]byte, error)` (32 CSPRNG bytes) and `GenerateRawKey() (string, error)` / CLI `-generate-raw` (32-character CSPRNG Base64URL string with 192 bits of entropy) so callers can generate strong raw or hex master keys directly via `secretprotector`.
+- **Optional Additional Authenticated Data (AAD)**: Added `EncryptWithAAD`, `DecryptWithAAD`, `EncryptBytesWithAAD`, and `DecryptBytesWithAAD` to cryptographically bind ciphertext to contextual metadata while preserving full compatibility with existing `v1:gcm:` payloads (`aad = nil`).
+- **Explicit Version Rejection**: Added `ErrUnsupportedVersion` to distinguish unknown `v<N>:<alg>:` ciphertext format prefixes from corrupted payloads.
+- **CLI Raw Decryption Output**: Added `-raw` flag to suppress the trailing newline when decrypting secrets for binary or exact-match pipelines.
+
+### Changed
+- **CLI Flag Precedence**: Explicit CLI `-key-file` now takes priority over the ambient default `SECRETPROTECTOR_MASTER_KEY` environment variable unless `-key-env` is specified explicitly (`libsecsecrets.ResolveKey` retains `raw > env > file` precedence for Go library callers).
+- **Key Parsing Hygiene**: Consolidated key parsing, stripped only CRLF (`\r\n`) or LF (`\n`) line endings for printable-ASCII (`0x20..0x7E`) 32-byte text keys, and rejected `>32`-byte space-padded, standalone-`\r`, and non-printable binary files ending in `\n`/`\r\n` instead of silently truncating them. `IsEncrypted` and `IsEncryptedBytes` trim surrounding ASCII whitespace consistently.
+- **Isolated Dependency Injection**: Replaced exported mutable mock globals and `sync.RWMutex` locking in `pkg/libsecsecrets` with unexported `sysDeps` injection (`cliDeps` + `flag.FlagSet` via `runCLI` in the CLI), eliminating global mutable test hooks and enabling lock-free parallel execution.
+- **Context Safety**: Guarded `ctx.Err()` checks in `libsecsecrets` against `nil` `context.Context` values.
+
+### Security
+- **TOCTOU-Hardened Single-Open Key Reading**: Replaced `os.Stat` + `os.ReadFile` with a single `os.Open` + `f.Stat()` handle check, regular-file enforcement (`IsRegular()`), and bounded reading (`4096` bytes max for keys; `10 MiB` max for CLI stdin secrets).
+- **Unix Ownership & Special Bit Validation**: Enforced effective-UID ownership matching (`syscall.Stat_t.Uid == os.Geteuid()`) alongside `0400`/`0600` mode enforcement and rejection of setuid, setgid, and sticky bits on Unix systems.
+- **Windows Path & Symlink Hardening**: Canonicalized Windows key paths via `filepath.EvalSymlinks` (failing closed on symlink resolution errors) before validating exact path-segment boundaries (`Public`, `Temp`, `tmp`).
+
+### Fixed
+- **CLI Argument & Exit Code Handling**: Bare invocation, unexpected positional arguments, `-raw` outside `-decrypt`, `-version` combined with other actions, and empty `-encrypt` / `-decrypt` strings now reliably return `ExitUsageError` (`2`). Missing/unreadable key files and stdin/stdout stream errors consistently map to `ExitIOError` (`5`) with stderr diagnostics.
+
+---
+
+## [0.0.5] - 2026-11-11
+
+### Added
+- **Provider Architecture Roadmap**: Expanded `DESIGN.md` with the 3-tier `ChainedProvider` vault architecture specification (OS Keyring, Age/PKCS#12 File Vaults, and Cloud KMS / HashiCorp Vault).
+- **Automated Dependency Maintenance**: Added `.github/dependabot.yml` for weekly Go module dependency updates.
+
+### Changed
+- **Build Metadata Migration**: Migrated build and package configuration from `version.txt` and `main.txt` to `build.json`.
+
+### Fixed
+- **Binary Master Key File Resolution**: Preserved exact 32-byte raw master key files loaded from disk without destructive `strings.TrimSpace` stripping of leading or trailing `0x20` whitespace bytes, while retaining support for newline-terminated 64-character hex text key files.
+
+---
+
 ## [0.0.4] - 2026-08-04
 
 ### Changed

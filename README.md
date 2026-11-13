@@ -17,13 +17,13 @@ SecretProtector is a password obfuscation system for Go. It ensures that sensiti
 - **Unprivileged Execution Context**: Operates entirely within standard unprivileged user space without requiring root or Administrator privileges.
 
 > [!NOTE]
-> For in-depth cryptographic design choices, threat models, and security layer diagrams, refer to the authoritative [ARCHITECTURE.md Section 6: Security Architecture](./ARCHITECTURE.md#6-security-architecture).
+> For in-depth cryptographic design choices, threat models, and security layer diagrams, refer to the authoritative [ARCHITECTURE.md Section 7: Security Architecture](./ARCHITECTURE.md#7-security-architecture).
 
 ## Code Quality & Best Practices Assessment
-- **Zero-Allocation Primitives**: Provides `EncryptBytes` and `DecryptBytes` operating on byte slices to allow caller-managed zeroing and prevent heap string allocations.
-- **Thread Safety**: Core cryptographic functions are fully stateless and re-entrant. Internal test mocks use `sync.RWMutex` to support concurrent parallel testing (`t.Parallel()`).
+- **Zero-Allocation Primitives**: Provides `EncryptBytes`, `DecryptBytes`, `EncryptBytesWithAAD`, and `DecryptBytesWithAAD` operating on byte slices to allow caller-managed zeroing and prevent heap string allocations.
+- **Thread Safety**: Core cryptographic functions and production key resolution are stateless and lock-free. Internal tests inject isolated dependency structs (`sysDeps` / `cliDeps`) to run `t.Parallel()` without global mutable hooks or lock contention.
 - **Resource Efficiency**: Utilizes `sync.Pool` buffer recycling to minimize GC pressure during high-throughput key generation.
-- **Static Analysis Compliance**: 100% compliant with standard Go linter tools (`gofumpt`, `golangci-lint`, `gosec`).
+- **Static Analysis Compliance**: Verified with `gofmt`, `go vet`, and standard Go static analysis workflows.
 
 > [!NOTE]
 > For complete statement coverage reports, test suite inventory, and execution commands, refer to the authoritative [TESTING.md](./TESTING.md).
@@ -36,11 +36,13 @@ The `secretprotector` CLI utility provides the following flags:
 | :--- | :--- | :--- | :--- |
 | `-version` | bool | `false` | Print the version information and exit. |
 | `-generate` | bool | `false` | Generate a new 32-byte Master Key (64-char hex string). |
+| `-generate-raw` | bool | `false` | Generate a new 32-character raw Base64URL CSPRNG Master Key (192-bit entropy). |
 | `-encrypt` | string | `""` | The plaintext string to obfuscate (pass `-` to read from stdin). |
-| `-decrypt` | string | `""` | The Base64-encoded ciphertext to decrypt (pass `-` to read from stdin). |
+| `-decrypt` | string | `""` | The `v1:gcm:` (or legacy Base64) ciphertext to decrypt (pass `-` to read from stdin). |
+| `-raw` | bool | `false` | Omit the trailing newline from `-decrypt` output (exact plaintext bytes). |
 | `-key` | string | `""` | Provide the Master Key directly (64-char hex or 32-byte raw). |
 | `-key-env` | string | `SECRETPROTECTOR_MASTER_KEY` | The name of the environment variable containing the Master Key. |
-| `-key-file` | string | `""` | The fully qualified path to a file containing the Master Key (pass `-` to read from stdin). |
+| `-key-file` | string | `""` | Path to a protected file containing the Master Key (pass `-` to read from stdin). |
 
 ### Diagnostic Exit Codes
 
@@ -49,16 +51,16 @@ The `secretprotector` CLI returns structured status codes to simplify script aut
 | Exit Code | Constant | Meaning |
 | :--- | :--- | :--- |
 | `0` | `ExitSuccess` | Execution completed successfully. |
-| `2` | `ExitUsageError` | Invalid arguments, stdin collision, or mutually exclusive flags passed (`-generate`, `-encrypt`, `-decrypt`). |
-| `3` | `ExitKeyResolutionError` | Master key resolution failed or insecure key file permissions detected. |
-| `4` | `ExitCryptoError` | Cryptographic error (CSPRNG failure, MAC verification failed, invalid Base64). |
-| `5` | `ExitIOError` | File read/write failure or standard I/O error. |
+| `2` | `ExitUsageError` | Invalid arguments, bare/no-op invocation, `-raw` without `-decrypt`, empty `-encrypt`/`-decrypt` value, stdin collision, or mutually exclusive flags (`-version`, `-generate`, `-generate-raw`, `-encrypt`, `-decrypt`). |
+| `3` | `ExitKeyResolutionError` | Master key missing, invalid format, or insecure key file permissions/location detected. |
+| `4` | `ExitCryptoError` | Cryptographic error (CSPRNG failure, MAC verification failed, unsupported version, invalid Base64). |
+| `5` | `ExitIOError` | Key file open/stat/read error or standard I/O stream error. |
 
-**Key Resolution Precedence:**
-If multiple key sources are provided, the application resolves them in the following order:
+**CLI Key Resolution Precedence:**
+Explicit CLI key flags always take priority over the ambient default `SECRETPROTECTOR_MASTER_KEY` environment variable:
 1. **Direct Key (`-key`)**: Highest precedence.
-2. **Environment Variable (`-key-env`)**: Used if `-key` is not provided.
-3. **Key File (`-key-file`)**: Lowest precedence; used only if no key is found in the other sources. Support for stdin (`-key-file -`).
+2. **Explicit Key File (`-key-file`)**: Takes priority over the ambient default environment variable unless `-key-env` is also passed explicitly.
+3. **Environment Variable (`-key-env` / default `SECRETPROTECTOR_MASTER_KEY`)**: Used when neither `-key` nor `-key-file` overrides it (or when `-key-env` is passed explicitly). Support for stdin (`-key-file -`).
 
 ## CLI Usage Examples
 
@@ -67,8 +69,8 @@ Build the application with optimized settings for security and size.
 
 **Windows (PowerShell):**
 ```powershell
-# Get the version from version.txt
-$version = Get-Content version.txt -Raw
+# Get the version from build.json
+$version = (Get-Content build.json | ConvertFrom-Json).version
 
 # Build the application
 go build -buildvcs=false -ldflags "-s -w -X main.version=$version -trimpath" -buildmode=pie -o $env:TEMP/ ./cmd/secretprotector
@@ -76,17 +78,23 @@ go build -buildvcs=false -ldflags "-s -w -X main.version=$version -trimpath" -bu
 
 **Linux/Unix (Bash):**
 ```bash
-# Get the version from version.txt and build the application
-go build -buildvcs=false -ldflags "-s -w -X main.version=$(cat version.txt) -trimpath" -buildmode=pie -o ./secretprotector ./cmd/secretprotector
+# Get the version from build.json and build the application
+VERSION=$(grep -o '"version": *"[^"]*"' build.json | cut -d'"' -f4)
+go build -buildvcs=false -ldflags "-s -w -X main.version=$VERSION -trimpath" -buildmode=pie -o ./secretprotector ./cmd/secretprotector
 ```
 
 ### 2. Initial Setup: Generate a Master Key
-Generate a new secure key for your environment.
+Generate a new secure key for your environment. Use `-generate` for a 64-character hex key (full 256-bit entropy) or `-generate-raw` for a 32-character printable Base64URL key (192-bit entropy):
 
 **Windows (PowerShell) or Linux/Unix (Bash):**
 ```powershell
+# Standard 64-character hex key (256-bit entropy)
 go run ./cmd/secretprotector -generate
-# Output: 4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f (64 character hex string)
+# Output: 4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f
+
+# Compact 32-character printable raw key (192-bit entropy, safe in env vars and key files)
+go run ./cmd/secretprotector -generate-raw
+# Output: dGhpcy1pcy1hLTI0LWJ5dGUtY3Nwcm5n
 ```
 
 ### 3. Stdin Unix Pipeline Streaming
@@ -119,40 +127,26 @@ go run ./cmd/secretprotector -key "a_32_character_long_secret_str!!" -encrypt "y
 ```
 
 ### 5. Obfuscate a Secret (Environment Variable: `-key-env`)
-The recommended way for automated environments. By default, it looks for `SECRETPROTECTOR_MASTER_KEY`.
+The recommended option for containerized or CI/CD workflows where secrets are injected securely at process launch. By default, it looks for `SECRETPROTECTOR_MASTER_KEY`.
 
-**Windows Note:** The master key environment variable can be stored in either the **USER** or **SYSTEM** scope. The application retrieves the value from the process environment block, 
-where User variables take precedence over System variables.
+> [!WARNING]
+> Avoid persisting plaintext master keys in unencrypted login shell profiles (`~/.bashrc`, `~/.profile`) or via `setx` CLI arguments (`setx SECRETPROTECTOR_MASTER_KEY "..." /M`), which expose the key in process listings and store it unencrypted in Windows registry hives. For persistent services, prefer `-key-file` protected by OS permissions/ACLs, systemd `EnvironmentFile` (`0400`), or a dedicated secret manager.
 
-To ensure variables persist after a server reboot, use the `setx` command:
-- **User Scope:** `setx SECRETPROTECTOR_MASTER_KEY "your_hex_key"`
-- **System Scope:** `setx SECRETPROTECTOR_MASTER_KEY "your_hex_key" /M` (requires Administrative privileges)
-
-*Note: `setx` updates the registry; you must open a new terminal window for the changes to take effect in your current session.*
-
-#### 5.1 Set the environment variable (default name) with a 64-character hex string
+#### 5.1 Set the environment variable (session or service scope)
 **Windows (PowerShell):**
 ```powershell
-# Set for current session only
+# Set for current PowerShell session only
 $env:SECRETPROTECTOR_MASTER_KEY = "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
 $env:MY_APP_KEY = "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
 
-# Set permanently (User scope)
-setx SECRETPROTECTOR_MASTER_KEY "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
-setx MY_APP_KEY "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
-
-# Set permanently (System scope - Run as Admin)
-setx SECRETPROTECTOR_MASTER_KEY "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f" /M
-setx MY_APP_KEY "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f" /M
+# 32-character raw Base64URL key from -generate-raw also works directly in env vars
+$env:SECRETPROTECTOR_MASTER_KEY = "dGhpcy1pcy1hLTI0LWJ5dGUtY3Nwcm5n"
 ```
 
 **Linux/Unix (Bash):**
 ```bash
-# Set for current session
-export SECRETPROTECTOR_MASTER_KEY="4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
-export MY_APP_KEY="4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
-
-# To set permanently, add the above lines to your ~/.bashrc or ~/.profile
+# Set for current session (for hex or Base64URL text keys; use -key-file directly for raw binary keys)
+export SECRETPROTECTOR_MASTER_KEY="$(cat /etc/secrets/master.key)"
 ```
 
 #### 5.2 Encrypt using the default environment variable or a custom environment variable name
@@ -165,23 +159,24 @@ go run ./cmd/secretprotector -key-env "MY_APP_KEY" -encrypt "your_secret_here"
 ```
 
 ### 6. Obfuscate a Secret (Key File: `-key-file`)
-The most secure way to manage keys. The file must have restricted permissions. 
+The most secure way to manage keys at rest. The file must reside in a protected location with restricted access.
 
-**Important:** You **must** use absolute paths for the `-key-file` flag. Relative paths are disallowed to prevent path traversal attacks and ensure the application always references the intended secure location.
+**Path Guidance:** Relative paths are resolved and canonicalized cleanly, though **absolute paths are strongly recommended** for production services and scheduled jobs whose working directory may vary.
 
 **Security Requirements:**
-- **Windows:** Files cannot be in "Public" or "Temp" directories.
-- **Linux/Unix:** Files must have owner-only permissions (e.g., `0400` or `0600`).
+- **Linux/Unix:** Regular files only (`IsRegular()`, single `os.Open` + `f.Stat()` check), owner UID matching effective UID, no special mode bits (`setuid`/`setgid`/`sticky`), and owner-only permissions (`0400` or `0600`). Maximum key file size: `4096` bytes.
+- **Windows:** Resolves symlinks/junctions (`filepath.EvalSymlinks`) before rejecting shared or volatile path segments (`Public`, `Temp`, `tmp`). Harden file ACLs with `icacls` so only the service/owner account has read access.
 
 **Windows (PowerShell):**
 ```powershell
-# Encrypt using a key stored in a file
-go run ./cmd/secretprotector -key-file "C:\Users\Admin\Documents\master.key" -encrypt "your_secret_here"
+# Restrict ACLs to the current owner only, then encrypt using the key file
+icacls "C:\ProgramData\SecretProtector\master.key" /inheritance:r /grant:r "${env:USERNAME}:(R)"
+go run ./cmd/secretprotector -key-file "C:\ProgramData\SecretProtector\master.key" -encrypt "your_secret_here"
 ```
 
 **Linux/Unix (Bash):**
 ```bash
-# Ensure secure permissions first
+# Ensure owner-only permissions first
 chmod 0400 /etc/secrets/master.key
 
 # Encrypt using the key file
@@ -189,33 +184,33 @@ go run ./cmd/secretprotector -key-file "/etc/secrets/master.key" -encrypt "your_
 ```
 
 ### 7. Decrypt a Secret
-Decryption requires the same master key used for encryption. Examples are shown by key source.
+Decryption requires the same master key used for encryption. Both `v1:gcm:<base64>` and legacy unprefixed Base64 ciphertexts are accepted. Pass `-raw` to omit the trailing newline.
 
 #### 7.1 Direct Key (`-key`)
 **Windows (PowerShell) or Linux/Unix (Bash):**
 ```bash
-go run ./cmd/secretprotector -key "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f" -decrypt "A1B2C3D4..."
+go run ./cmd/secretprotector -key "4f7e2d9a3b1c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f" -decrypt "v1:gcm:A1B2C3D4..."
 # Output: your_secret_here
 ```
 
 #### 7.2 Environment Variable (`-key-env`)
-Refer to [Section 5.1](#51-set-the-environment-variable-default-name-with-a-64-character-hex-string) for instructions on how to set these variables for Windows and Linux.
+Refer to [Section 5.1](#51-set-the-environment-variable-session-or-service-scope) for instructions on providing these variables safely.
 
 **Windows (PowerShell) or Linux/Unix (Bash):**
 ```bash
 # Using the default environment variable (SECRETPROTECTOR_MASTER_KEY)
-go run ./cmd/secretprotector -decrypt "A1B2C3D4..."
+go run ./cmd/secretprotector -decrypt "v1:gcm:A1B2C3D4..."
 # Output: your_secret_here
 
 # Using a custom environment variable name
-go run ./cmd/secretprotector -key-env "MY_APP_KEY" -decrypt "A1B2C3D4..."
+go run ./cmd/secretprotector -key-env "MY_APP_KEY" -decrypt "v1:gcm:A1B2C3D4..."
 # Output: your_secret_here
 ```
 
 #### 7.3 Key File (`-key-file`)
 **Windows (PowerShell):**
 ```powershell
-go run ./cmd/secretprotector -key-file "C:\Users\Admin\Documents\master.key" -decrypt "A1B2C3D4..."
+go run ./cmd/secretprotector -key-file "C:\ProgramData\SecretProtector\master.key" -decrypt "v1:gcm:A1B2C3D4..."
 # Output: your_secret_here
 ```
 
@@ -224,8 +219,8 @@ go run ./cmd/secretprotector -key-file "C:\Users\Admin\Documents\master.key" -de
 # Ensure secure permissions first
 chmod 0400 /etc/secrets/master.key
 
-go run ./cmd/secretprotector -key-file "/etc/secrets/master.key" -decrypt "A1B2C3D4..."
-# Output: your_secret_here
+go run ./cmd/secretprotector -key-file "/etc/secrets/master.key" -decrypt "v1:gcm:A1B2C3D4..." -raw
+# Output: your_secret_here (exact bytes without trailing newline)
 ```
 
 ## Library Integration

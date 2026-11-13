@@ -48,7 +48,7 @@ import (
 	"os"
 	"time"
 
-	"criticalsys.net/secretprotector/pkg/libsecsecrets"
+	"github.com/edsilegxrepo/secretprotector/pkg/libsecsecrets"
 )
 
 type Config struct {
@@ -125,6 +125,7 @@ func performSecureOperation(host, user string, pass []byte) {
 ## 4. Security Best Practices
 
 *   **Memory Hygiene:** Never print decrypted passwords or master keys to `stdout` or log files. Always use `defer libsecsecrets.ZeroBuffer(masterKey)` and `defer libsecsecrets.ZeroBuffer(passBytes)` to clear sensitive keys and plaintext byte buffers from memory as soon as cryptographic operations complete. Note that `libsecsecrets` uses `sync.Pool` internally for efficient buffer management during key generation, but manual zeroing of resolved keys and plaintext byte buffers remains a critical responsibility of the consumer application.
+*   **Programmatic Key Generation & AAD:** Use `GenerateKey()`, `GenerateRawKey()`, or `GenerateKeyBytes()` to provision master keys directly from `libsecsecrets`. When encrypting structured config fields bound to a specific context (such as host + username or key ID), prefer `EncryptWithAAD` / `DecryptWithAAD` (or `EncryptBytesWithAAD` / `DecryptBytesWithAAD`) to prevent ciphertext relocation across fields.
 *   **Zero-Allocation Byte API:** Prefer `DecryptBytes(ctx, []byte(ciphertext), masterKey)` over string `Decrypt`, as string decryption allocates heap memory that cannot be explicitly zeroed before garbage collection.
 *   **Context Support:** Use `context.Context` (e.g., `context.WithTimeout`) for all library calls to support timeouts and cancellations in production service environments.
 *   **Fail Fast & Fail Safe:** If the master key cannot be resolved or decryption fails, the application **must** terminate immediately before attempting any unauthenticated operational connections.
